@@ -114,7 +114,9 @@ class DatabaseManager(DBConnection):
         """
         super().__init__(**kwargs)
 
-    def _execute_query(self, query: str, params: Optional[tuple], retries: int = 3):
+    def _execute_select_query(
+        self, query: str, params: Optional[tuple], retries: int = 3
+    ):
         """
         Executes a query up to a certain number of retries.
 
@@ -128,24 +130,23 @@ class DatabaseManager(DBConnection):
 
         Raises:
             ValueError: If retries > 10
-            sqlite3.OperationalError: If database operations fail after retries
+            sqlite3.OperationalError: If database operations fail after retries.
         """
         if retries > 10:
             raise ValueError("Maximum retries cannot exceed 10")
 
         for attempt in range(retries):
             try:
-                with self.connection as connection:
-                    cursor = connection.cursor()
+                cursor = self.connection.cursor()
 
-                    cursor.execute(sql=query, parameters=params or ())
-                    rows = cursor.fetchall()
+                cursor.execute(sql=query, parameters=params or ())
+                rows = cursor.fetchall()
 
-                    self.logger.info(
-                        f"Successfully fetched {len(rows)} rows for query: {query}"
-                    )
+                self.logger.info(
+                    f"Successfully fetched {len(rows)} rows for query: {query}"
+                )
 
-                    return rows
+                return rows
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt < retries - 1:
                     time.sleep(seconds=(0.1 * (2**attempt)))
@@ -155,17 +156,25 @@ class DatabaseManager(DBConnection):
             finally:
                 cursor.close()
 
-    def execute(self, query: str, params: Optional[tuple] = None) -> int:
+    def _execute(self, query: str, params: Optional[tuple] = None) -> int:
         """
         Execute a query that doesn't return rows (e.g., INSERT, UPDATE, DELETE).
 
+        Args:
+            query (str): The SQL query to be executed.
+            params (tuple, optional): Parameters for the query (prevents SQL injection).
+            retries (int): Number of retries for a query (max 10).
+
         Returns:
-            Number of rows affected
+            Number of rows affected.
         """
         cursor = self.connection.cursor()
         try:
-            cursor.execute(query, params or ())
+            cursor = self.connection.cursor()
+
+            cursor.execute(sql=query, parameters=params or ())
             self.connection.commit()
+
             return cursor.rowcount
         except Exception as e:
             self.connection.rollback()
@@ -174,8 +183,17 @@ class DatabaseManager(DBConnection):
         finally:
             cursor.close()
 
-    def _find_one(self, columns: List[str], table: str):
-        pass
+    def _find_one(self, query: str, params: Optional[tuple] = None) -> str:
+        """
+        Finds one record
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            cursor.execute(sql=query, parameters=params or ())
+            return cursor.fetchone()
+        finally:
+            cursor.close()
 
     def _find_all():
         pass
@@ -191,6 +209,7 @@ class DMLQueryBuilder:
         table: str,
         where_clause: Optional[str],
         order_by_col: Optional[str],
+        group_by_col: Optional[str],
         asc_desc: Optional[SQLQueryParams],
         limit: Optional[int] = None,
     ) -> str:
@@ -201,9 +220,12 @@ class DMLQueryBuilder:
         if where_clause:
             query_parts.append(f"WHERE {where_clause}")
 
+        if group_by_col:
+            query_parts.append(f"GROUP BY {group_by_col}")
+
         if order_by_col:
-            direction = f" {asc_desc.value.upper()}" if asc_desc else ""
-            query_parts.append(f"ORDER BY {order_by_col}{direction}")
+            direction = f"{asc_desc.value.upper()}" if asc_desc else ""
+            query_parts.append(f"ORDER BY {order_by_col} {direction}")
 
         if limit:
             query_parts.append(f"LIMIT {limit}")
@@ -214,17 +236,20 @@ class DMLQueryBuilder:
     def insert(
         columns: List[str],
         table: str,
-        where_clause: str,
-    ):
-        pass
+    ) -> str:
+        columns_str = ", ".join(columns)
+
+        placeholders = ", ".join(["?" for _ in columns])
+        return f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
 
     @staticmethod
     def update():
         pass
 
     @staticmethod
-    def delete():
-        pass
+    def delete(table: str, where_clause: str) -> str:
+        """Build delete query."""
+        return f"DELETE FROM {table} WHERE {where_clause}"
 
 
 class DDLQueryBuilder:
@@ -234,7 +259,13 @@ class DDLQueryBuilder:
 
     @staticmethod
     def alter():
+        """Build alter table query."""
         pass
+
+    @staticmethod
+    def drop_table(table: str) -> str:
+        """Build drop table query."""
+        return f"DROP TABLE IF EXISTS {table}"
 
 
 class IsolationLevels(Enum):
