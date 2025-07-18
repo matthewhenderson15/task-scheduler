@@ -237,14 +237,26 @@ class DMLQueryBuilder:
         columns: List[str],
         table: str,
     ) -> str:
+        """Build insert query."""
         columns_str = ", ".join(columns)
 
         placeholders = ", ".join(["?" for _ in columns])
         return f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
 
     @staticmethod
-    def update():
-        pass
+    def update(
+        table: str, columns: List[str], values: List[str], where_clause: str
+    ) -> str:
+        """Build update query"""
+        if len(columns) != len(values):
+            raise ValueError("Each column must have a corresponding update value!")
+
+        base_col_str = ""
+        for i in range(columns):
+            base_col_str += f"{columns[i]} = {values[i]}"
+            base_col_str += ", " if i != len(columns) - 1 else ""
+
+        return f"UPDATE {table} SET {base_col_str} WHERE {where_clause}"
 
     @staticmethod
     def delete(table: str, where_clause: str) -> str:
@@ -254,8 +266,30 @@ class DMLQueryBuilder:
 
 class DDLQueryBuilder:
     @staticmethod
-    def create():
-        pass
+    def create(table: str, columns: List[tuple], primary_key_col: str) -> str:
+        """
+        Build create table query.
+
+        Args:
+            table (str): The desired table name.
+            columns (List[tuple]): A list of column names and associated types.
+            primary_key_col (str): The column name
+
+        """
+        if primary_key_col not in [col[0] for col in columns]:
+            raise ValueError(
+                "Primary key column must be one of the desired columns in the table!"
+            )
+
+        final_column_types = ""
+
+        for col_type in columns:
+            final_column_types += f"{col_type[0]} {col_type[1]}"
+            final_column_types += (
+                " PRIMARY_KEY," if col_type[0] == primary_key_col else ","
+            )
+
+        return f"CREATE TABLE IF NOT EXISTS {table} ({final_column_types})"
 
     @staticmethod
     def alter():
