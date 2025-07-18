@@ -56,7 +56,7 @@ class DBConnection:
             sqlite3.Connection: A connection to the SQLite3 database.
 
         Raises:
-            sqlite3.DatabaseError:
+            sqlite3.DatabaseError: If there's an error in establishing the DB connection.
         """
 
         try:
@@ -78,6 +78,8 @@ class DBConnection:
             """Enable foreign key constraints and write-ahead logging, better for concurrency."""
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
+
+            connection.row_factory = sqlite3.Row
 
             return connection
         except sqlite3.DatabaseError as e:
@@ -115,8 +117,8 @@ class DatabaseManager(DBConnection):
         super().__init__(**kwargs)
 
     def _execute_select_query(
-        self, query: str, params: Optional[tuple], retries: int = 3
-    ):
+        self, query: str, params: Optional[tuple] = None, retries: int = 3
+    ) -> List[sqlite3.Row]:
         """
         Executes a query up to a certain number of retries.
 
@@ -129,13 +131,14 @@ class DatabaseManager(DBConnection):
             List of row results from the SQLite3 database.
 
         Raises:
-            ValueError: If retries > 10
+            ValueError: If retries > 10.
             sqlite3.OperationalError: If database operations fail after retries.
         """
         if retries > 10:
             raise ValueError("Maximum retries cannot exceed 10")
 
         for attempt in range(retries):
+            cursor = None
             try:
                 cursor = self.connection.cursor()
 
@@ -149,14 +152,21 @@ class DatabaseManager(DBConnection):
                 return rows
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt < retries - 1:
-                    time.sleep(seconds=(0.1 * (2**attempt)))
+                    wait_time = time.sleep(seconds=(0.1 * (2**attempt)))
+                    self.logger.warning(
+                        f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{retries})"
+                    )
+                    time.sleep(wait_time)
                     continue
                 self.logger.error(f"An error occurred while fetching records: {e}")
                 raise e
             finally:
-                cursor.close()
+                if cursor:
+                    cursor.close()
 
-    def _execute(self, query: str, params: Optional[tuple] = None) -> int:
+    def _execute(
+        self, query: str, params: Optional[tuple] = None, retries: int = 3
+    ) -> int:
         """
         Execute a query that doesn't return rows (e.g., INSERT, UPDATE, DELETE).
 
@@ -167,7 +177,14 @@ class DatabaseManager(DBConnection):
 
         Returns:
             Number of rows affected.
+
+        Raises:
+            ValueError: If retries > 10.
+            sqlite3.OperationalError: If database operations fail after retries.
         """
+        if retries > 10:
+            raise ValueError("Maximum retries cannot exceed 10")
+
         cursor = self.connection.cursor()
         try:
             cursor = self.connection.cursor()
@@ -200,6 +217,21 @@ class DatabaseManager(DBConnection):
 
     def _find_many():
         pass
+
+    def begin_transaction(self):
+        """Begin a database transaction."""
+        self.connection.execute("BEGIN")
+        self.logger.info("Transaction started")
+
+    def commit_transaction(self):
+        """Commit the current transaction."""
+        self.connection.commit()
+        self.logger.info("Transaction committed")
+
+    def rollback_transaction(self):
+        """Rollback the current transaction."""
+        self.connection.rollback()
+        self.logger.info("Transaction rolled back")
 
 
 class DMLQueryBuilder:
