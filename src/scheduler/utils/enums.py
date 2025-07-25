@@ -27,7 +27,7 @@ class NodeStatus(Enum):
 class WorkerStatus(Enum):
     BUSY = "busy"
     IDLE = "idle"
-    ERROR = "ERROR"
+    ERROR = "error"
 
 
 class ScheduleType(Enum):

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pathlib
 import sqlite3
+import threading
 import time
 from enum import Enum
+from queue import Queue
 from typing import List, Optional
 
 from scheduler.utils.helpers import Utils
@@ -17,8 +19,19 @@ class DBConnection:
         timeout: float = 3600.0,
         isolation_level: Optional[IsolationLevels] = None,
         check_same_thread: bool = False,
+        pool_size: int = 5,
     ) -> None:
         """Initializes a SQLite3 database connection."""
+        self.file_system = file_system
+        self.in_memory = in_memory
+        self.timeout = timeout
+        self.isolation_level = isolation_level
+        self.check_same_thread = check_same_thread
+        self.pool_size = pool_size
+        self.connection_pool = Queue(maxsize=pool_size)
+        self.pool_lock = threading.Lock()
+        self._initialize_pool()
+
         self.connection = self.__create_engine_conn(
             file_system=file_system,
             in_memory=in_memory,
@@ -27,6 +40,19 @@ class DBConnection:
             check_same_thread=check_same_thread,
         )
         self.logger = Utils.__set_logger()
+
+    def _initialize_pool(self):
+        """Initialize the connection pool with multiple connections."""
+        for i in range(self.pool_size):
+            conn = self.__create_engine_conn(
+                file_system=self.file_system,
+                in_memory=self.in_memory,
+                timeout=self.timeout,
+                isolation_level=self.isolation_level,
+                check_same_thread=self.check_same_thread,
+            )
+            self.connection_pool.put(conn)
+            self.logger.info(f"Created connection {i + 1}/{self.pool_size} for pool")
 
     def __create_engine_conn(
         self,
