@@ -4,6 +4,7 @@ import pathlib
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from enum import Enum
 from queue import Queue
 from typing import List, Optional
@@ -21,7 +22,7 @@ class DBConnection:
         check_same_thread: bool = False,
         pool_size: int = 5,
     ) -> None:
-        """Initializes a SQLite3 database connection."""
+        """Initializes a SQLite3 database connection pool."""
         self.file_system = file_system
         self.in_memory = in_memory
         self.timeout = timeout
@@ -101,9 +102,17 @@ class DBConnection:
                 check_same_thread=check_same_thread,
             )
 
-            """Enable foreign key constraints and write-ahead logging, better for concurrency."""
+            """
+            Enable foreign key constraints and write-ahead logging, better for concurrency.
+            
+            Set larger cache and store temp tables in memory.
+            """
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA cache_size = 10000")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            connection.execute("PRAGMA mmap_size = 268435456")
 
             connection.row_factory = sqlite3.Row
 
@@ -114,14 +123,48 @@ class DBConnection:
             )
             raise e
 
+    @contextmanager
+    def get_connection(self):
+        """
+        Context manager for getting and returning connections from the pool.
+
+        Usage:
+            with db_manager.get_connection() as conn:
+                cursor = conn.execute("SELECT * FROM tasks")
+                results = cursor.fetchall()
+        """
+        conn = None
+        try:
+            conn = self.connection_pool.get(timeout=self.timeout)
+            self.logger.debug("Retrieved connection from pool")
+            yield conn
+        except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                # TODO - what exception should be thrown here?
+                except Exception:
+                    pass
+            raise e
+        finally:
+            if conn:
+                self.connection_pool.put(conn)
+                self.logger.debug("Returned connection to pool")
+
+    def __close_pool(self):
+        """Close all connections in the pool."""
+        closed_count = 0
+        while not self.connection_pool.empty():
+            try:
+                conn = self.connection_pool.get_nowait()
+                conn.close()
+                closed_count += 1
+            except Empty:
+                break
+        self.logger.info(f"Closed {closed_count} connections from pool")
+
     def close(self):
-        """Close database connection."""
-        if self.connection:
-            self.connection.close()
-            self.connection = None
-            self.logger.info("Database connection closed.")
-        else:
-            self.logger.warning("Connection already closed or never established.")
+        self.__close_pool()
 
     def __enter__(self):
         """Context manager entry."""
@@ -226,23 +269,47 @@ class DatabaseManager(DBConnection):
         finally:
             cursor.close()
 
-    def _find_one(self, query: str, params: Optional[tuple] = None) -> str:
+    def _find_one(
+        self, query: str, params: Optional[tuple] = None
+    ) -> Optional[sqlite3.Row]:
         """
-        Finds one record
+        Find one record using connection pool.
+
+        Args:
+            query (str): The query to be executed.
+            params (tuple, optional):
+
         """
-        try:
-            cursor = self.connection.cursor()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor._execute(query, params or ())
+                return cursor.fetchone()
+            finally:
+                cursor.close()
 
-            cursor.execute(sql=query, parameters=params or ())
-            return cursor.fetchone()
-        finally:
-            cursor.close()
+    def _find_all(
+        self, query: str, params: Optional[tuple] = None
+    ) -> List[sqlite3.Row]:
+        """
+        Wrapper for execute select query function. Finds and returns all records.
 
-    def _find_all():
-        pass
+        Args:
+            query (str): The query to be executed.
+            params (tuple, optional): The parameters to be passed to the query.
 
-    def _find_many():
-        pass
+        Returns:
+            List of all the database rows.
+        """
+        return self._execute_select_query(query=query, params=params)
+
+    def _find_many(
+        self, query: str, params: Optional[tuple] = None, limit: int = 100
+    ) -> List[sqlite3.Row]:
+        """
+        Find many records with limit."""
+        limited_query = f"{query} LIMIT {limit}"
+        return self._execute_select_query(limited_query, params)
 
     def begin_transaction(self):
         """Begin a database transaction."""
