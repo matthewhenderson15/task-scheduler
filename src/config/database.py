@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import pathlib
+import queue
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from enum import Enum
-from queue import Queue
 from typing import List, Optional
 
 from scheduler.utils.helpers import Utils
@@ -29,7 +29,7 @@ class DBConnection:
         self.isolation_level = isolation_level
         self.check_same_thread = check_same_thread
         self.pool_size = pool_size
-        self.connection_pool = Queue(maxsize=pool_size)
+        self.connection_pool = queue.Queue(maxsize=pool_size)
         self.pool_lock = threading.Lock()
         self._initialize_pool()
 
@@ -142,7 +142,6 @@ class DBConnection:
             if conn:
                 try:
                     conn.rollback()
-                # TODO - what exception should be thrown here?
                 except Exception:
                     pass
             raise e
@@ -159,9 +158,9 @@ class DBConnection:
                 conn = self.connection_pool.get_nowait()
                 conn.close()
                 closed_count += 1
-            except Empty:
+            except queue.Empty:
                 break
-        self.logger.info(f"Closed {closed_count} connections from pool")
+        self.logger.info(f"Closed {closed_count} connections from pool.")
 
     def close(self):
         self.__close_pool()
@@ -207,28 +206,21 @@ class DatabaseManager(DBConnection):
             raise ValueError("Maximum retries cannot exceed 10")
 
         for attempt in range(retries):
-            cursor = None
             try:
-                cursor = self.connection.cursor()
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
 
-                cursor.execute(sql=query, parameters=params or ())
-                rows = cursor.fetchall()
+                    cursor.execute(sql=query, parameters=params or ())
+                    rows = cursor.fetchall()
 
-                self.logger.info(
-                    f"Successfully fetched {len(rows)} rows for query: {query}"
-                )
+                    self.logger.info(
+                        f"Successfully fetched {len(rows)} rows for query: {query}"
+                    )
 
                 return rows
             except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < retries - 1:
-                    wait_time = time.sleep(seconds=(0.1 * (2**attempt)))
-                    self.logger.warning(
-                        f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{retries})"
-                    )
-                    time.sleep(wait_time)
-                    continue
-                self.logger.error(f"An error occurred while fetching records: {e}")
-                raise e
+                self.__determine_retry(attempt=attempt, retries=retries, e=e)
+                continue
             finally:
                 if cursor:
                     cursor.close()
@@ -241,7 +233,7 @@ class DatabaseManager(DBConnection):
 
         Args:
             query (str): The SQL query to be executed.
-            params (tuple, optional): Parameters for the query (prevents SQL injection).
+            params (tuple, optional): Parameters for the query to prevent SQL injection.
             retries (int): Number of retries for a query (max 10).
 
         Returns:
@@ -254,20 +246,25 @@ class DatabaseManager(DBConnection):
         if retries > 10:
             raise ValueError("Maximum retries cannot exceed 10")
 
-        cursor = self.connection.cursor()
-        try:
-            cursor = self.connection.cursor()
+        for attempt in range(retries):
+            try:
+                with self.get_connection() as conn:
+                    try:
+                        cursor = conn.cursor()
 
-            cursor.execute(sql=query, parameters=params or ())
-            self.connection.commit()
+                        cursor.execute(sql=query, parameters=params or ())
+                        conn.commit()
 
-            return cursor.rowcount
-        except Exception as e:
-            self.connection.rollback()
-            self.logger.error(f"Error executing query: {e}")
-            raise e
-        finally:
-            cursor.close()
+                        return cursor.rowcount
+                    except Exception as e:
+                        conn.rollback()
+                        self.logger.error(f"Error executing query: {e}")
+                        raise e
+                    finally:
+                        cursor.close()
+            except sqlite3.OperationalError as e:
+                self.__determine_retry(attempt=attempt, retries=retries, e=e)
+                continue
 
     def _find_one(
         self, query: str, params: Optional[tuple] = None
@@ -283,7 +280,7 @@ class DatabaseManager(DBConnection):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             try:
-                cursor._execute(query, params or ())
+                cursor.execute(sql=query, parameters=params or ())
                 return cursor.fetchone()
             finally:
                 cursor.close()
@@ -307,9 +304,25 @@ class DatabaseManager(DBConnection):
         self, query: str, params: Optional[tuple] = None, limit: int = 100
     ) -> List[sqlite3.Row]:
         """
-        Find many records with limit."""
+        Find many records with limit.
+
+        Args:
+            query (str): The query to be executed.
+            params (tuple, optional): The parameters to be passed to the query.
+            limit (int): The limit to be applied to the query.
+        Returns:
+            List of all the database rows.
+        """
         limited_query = f"{query} LIMIT {limit}"
         return self._execute_select_query(limited_query, params)
+
+    def __determine_retry(self, attempt: int, retries: int, e: str) -> None:
+        if "database is locked" in str(e) and attempt < retries - 1:
+            wait_time = 0.1 * (2**attempt)
+            self.logger.warning(
+                f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{retries})"
+            )
+            time.sleep(wait_time)
 
     def begin_transaction(self):
         """Begin a database transaction."""
@@ -339,19 +352,15 @@ class DMLQueryBuilder:
         limit: Optional[int] = None,
     ) -> str:
         columns_str = ", ".join(columns)
-
         query_parts = [f"SELECT {columns_str}", f"FROM {table}"]
 
         if where_clause:
             query_parts.append(f"WHERE {where_clause}")
-
         if group_by_col:
             query_parts.append(f"GROUP BY {group_by_col}")
-
         if order_by_col:
             direction = f"{asc_desc.value.upper()}" if asc_desc else ""
             query_parts.append(f"ORDER BY {order_by_col} {direction}")
-
         if limit:
             query_parts.append(f"LIMIT {limit}")
 
@@ -364,8 +373,8 @@ class DMLQueryBuilder:
     ) -> str:
         """Build insert query."""
         columns_str = ", ".join(columns)
-
         placeholders = ", ".join(["?" for _ in columns])
+
         return f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
 
     @staticmethod
@@ -376,12 +385,10 @@ class DMLQueryBuilder:
         if len(columns) != len(values):
             raise ValueError("Each column must have a corresponding update value!")
 
-        base_col_str = ""
-        for i in range(columns):
-            base_col_str += f"{columns[i]} = {values[i]}"
-            base_col_str += ", " if i != len(columns) - 1 else ""
+        set_clauses = [f"{col} = ?" for col in columns]
+        set_str = ", ".join(set_clauses)
 
-        return f"UPDATE {table} SET {base_col_str} WHERE {where_clause}"
+        return f"UPDATE {table} SET {set_str} WHERE {where_clause}"
 
     @staticmethod
     def delete(table: str, where_clause: str) -> str:
