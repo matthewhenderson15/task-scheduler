@@ -184,6 +184,22 @@ class DatabaseManager(DBConnection):
         """
         super().__init__(**kwargs)
 
+    def _execute_transaction(self, query_and_params: List[tuple]) -> int:
+        """
+        Executes multiple queries in a transaction.
+
+        Params:
+            query_and_params (List, tuple):
+
+        Returns:
+            Number of rows affected in the transaction.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+        except:
+            pass
+
     def _execute_select_query(
         self, query: str, params: Optional[tuple] = None, retries: int = 3
     ) -> List[sqlite3.Row]:
@@ -464,7 +480,7 @@ class DDLQueryBuilder:
             return f"ALTER TABLE {table} RENAME COLUMN {old_column} TO {new_column}"
 
         elif operation == AlterTypes.RENAME_TABLE:
-            if not new_column:  # Using new_column parameter for new table name
+            if not new_column:
                 raise ValueError(
                     "new_column (new table name) required for RENAME_TABLE"
                 )
