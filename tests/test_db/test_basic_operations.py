@@ -90,9 +90,9 @@ class TestQueryExecution:
         )
 
         assert len(results) == 5
-        assert results[0]["name"] == "Charlie Brown"  # age 22
-        assert results[1]["name"] == "Eve Adams"  # age 25
-        assert results[2]["name"] == "Alice Johnson"  # age 28
+        assert results[0]["name"] == "Charlie Brown"
+        assert results[1]["name"] == "Eve Adams"
+        assert results[2]["name"] == "Alice Johnson"
 
     def test_find_many_with_limit(self, populated_db_manager):
         """Test _find_many method with limit."""
@@ -101,9 +101,9 @@ class TestQueryExecution:
         )
 
         assert len(results) == 3
-        assert results[0]["name"] == "Charlie Brown"  # age 22
-        assert results[1]["name"] == "Eve Adams"  # age 25
-        assert results[2]["name"] == "Alice Johnson"  # age 28
+        assert results[0]["name"] == "Charlie Brown"
+        assert results[1]["name"] == "Eve Adams"
+        assert results[2]["name"] == "Alice Johnson"
 
     def test_execute_select_query_with_retries(self, db_manager):
         """Test _execute_select_query retry mechanism."""
