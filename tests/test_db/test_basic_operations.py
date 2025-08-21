@@ -62,15 +62,15 @@ class TestQueryExecution:
         )
         assert result is None
 
-    def test_find_one_query(self, db_manager):
+    def test_find_one_query(self, db_manager: DatabaseManager):
         """Test _find_one method."""
         db_manager._execute(
-            "INSERT INTO test_table (name, age, email) VALUES (?, ?, ?)",
-            ("Alice Johnson", 28, "alice@example.com"),
+            query="INSERT INTO test_table (name, age, email) VALUES (?, ?, ?)",
+            params=("Alice Johnson", 28, "alice@example.com"),
         )
 
         result = db_manager._find_one(
-            "SELECT * FROM test_table WHERE name = ?", ("Alice Johnson",)
+            query="SELECT * FROM test_table WHERE name = ?", params=("Alice Johnson",)
         )
 
         assert result is not None
@@ -79,7 +79,7 @@ class TestQueryExecution:
         assert result["email"] == "alice@example.com"
 
         no_result = db_manager._find_one(
-            "SELECT * FROM test_table WHERE name = ?", ("Nonexistent",)
+            query="SELECT * FROM test_table WHERE name = ?", params=("Nonexistent",)
         )
         assert no_result is None
 
