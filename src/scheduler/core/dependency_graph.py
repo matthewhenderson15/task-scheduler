@@ -124,6 +124,12 @@ class DependencyGraph:
         return (False, None)
 
     def _get_ready_tasks(self) -> List[str]:
+        """
+        Identifies tasks that are ready to run (no pending dependencies).
+        
+        Returns:
+            List[str]: List of task IDs that became ready and were added to queue
+        """
         ready_tasks = []
 
         for task_id, task in self.tasks.items():
@@ -179,7 +185,7 @@ class DependencyGraph:
 
         return None
 
-    def mark_complete_task(self, task_id: str) -> List[Task]:
+    def mark_task_complete(self, task_id: str) -> List[str]:
         """
         Marks a task as completed and updates dependent tasks.
 
@@ -187,7 +193,7 @@ class DependencyGraph:
             task_id (str): The task_id to be marked as complete.
 
         Returns:
-            List[Task]: A list of newly ready tasks based on dependent task updates.
+            List[str]: List of newly ready task IDs that became available.
 
         Raises:
             ValueError: If the task is not in the task list or is not in a RUNNING state.
@@ -214,7 +220,7 @@ class DependencyGraph:
             ):
                 dependent_task = self.tasks[dependent_task_id]
                 dependent_task.status = Status.READY
-                new_ready_tasks.append(dependent_task)
+                new_ready_tasks.append(dependent_task_id)
 
                 heap_entry = (
                     dependent_task.scheduled_time,
@@ -226,8 +232,32 @@ class DependencyGraph:
 
         return new_ready_tasks
 
-    def retry_failed_tasks(self):
-        pass
+    def retry_failed_tasks(self) -> List[str]:
+        """
+        Gathers tasks that failed and adds them back to the ready queue.
+
+        Returns:
+            List[str]: List of task IDs that were retried and added back to queue.
+        """
+        retry_tasks = []
+
+        for task_id, task in self.tasks.items():
+            if task.status == Status.FAILED:
+                if self.in_degree[task_id] == 0:
+                    task.status = Status.READY
+                    retry_tasks.append(task_id)
+
+                    heap_entry = (
+                        task.scheduled_time,
+                        task.priority,
+                        task.task_id,
+                        task.tenant_id,
+                    )
+                    heapq.heappush(self.ready_queue, heap_entry)
+                else:
+                    task.status = Status.PENDING
+
+        return retry_tasks
 
     def _get_task_summary(self):
         pass
