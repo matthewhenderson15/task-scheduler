@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import heapq
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 class Status(Enum):
@@ -166,9 +165,6 @@ class DependencyGraph:
 
         Returns:
             List[str]: List of newly ready task IDs that became available.
-
-        Raises:
-            ValueError: If the task is not in the task list or is not in a RUNNING state.
         """
         if task_id not in self.tasks:
             raise ValueError(f"Task {task_id} not found in dependency graph.")
@@ -203,112 +199,15 @@ class DependencyGraph:
 
         return new_ready_tasks
 
-    def retry_failed_tasks(self) -> List[str]:
-        """
-        Gathers tasks that failed and adds them back to the ready queue.
+    def mark_test_running(self, task_id: str):
+        """Mark task as running"""
+        if task_id in self.tasks:
+            self.tasks[task_id].status = Status.RUNNING
 
-        Returns:
-            List[str]: List of task IDs that were retried and added back to queue.
-        """
-        retry_tasks = []
-
-        for task_id, task in self.tasks.items():
-            if task.status == Status.FAILED:
-                if self.in_degree[task_id] == 0:
-                    task.status = Status.READY
-                    retry_tasks.append(task_id)
-
-                    heap_entry = (
-                        task.scheduled_time,
-                        task.priority,
-                        task.task_id,
-                    )
-                    heapq.heappush(self.ready_queue, heap_entry)
-                else:
-                    task.status = Status.PENDING
-
-        return retry_tasks
-
-    def _get_task_summary(self) -> TaskSummary:
-        """
-        Generates a comprehensive summary of all tasks in the dependency graph.
-
-        Returns:
-            TaskSummary: Complete overview of task statuses, dependencies, and metrics
-        """
-        total_tasks = len(self.tasks)
-        status_counts = {}
-        tasks_with_dependencies = 0
-        tasks_without_dependencies = 0
-        blocked_tasks = 0
-        pending_tasks = []
-        ready_tasks = []
-        running_tasks = []
-        completed_tasks = []
-        failed_tasks = []
-        cancelled_tasks = []
-        max_dependencies = 0
-        most_blocked_task = None
-        total_priority = 0
-        tenants_set = set()
-
-        for task_id, task in self.tasks.items():
-            status_str = task.status.value
-            status_counts[status_str] = status_counts.get(status_str, 0) + 1
-
-            task_in_degree = self.in_degree[task_id]
-            if task_in_degree > 0:
-                tasks_with_dependencies += 1
-                if task.status == Status.PENDING:
-                    blocked_tasks += 1
-            else:
-                tasks_without_dependencies += 1
-
-            if task_in_degree > max_dependencies:
-                max_dependencies = task_in_degree
-                most_blocked_task = task_id
-
-            if task.status == Status.PENDING:
-                pending_tasks.append(task_id)
-            elif task.status == Status.READY:
-                ready_tasks.append(task_id)
-            elif task.status == Status.RUNNING:
-                running_tasks.append(task_id)
-            elif task.status == Status.COMPLETED:
-                completed_tasks.append(task_id)
-            elif task.status == Status.FAILED:
-                failed_tasks.append(task_id)
-            elif task.status == Status.CANCELLED:
-                cancelled_tasks.append(task_id)
-
-            total_priority += task.priority
-            tenants_set.add(task.tenant_id)
-
-        completion_percentage = (
-            (len(completed_tasks) / total_tasks * 100.0) if total_tasks > 0 else 0.0
-        )
-        ready_queue_size = len(self.ready_queue)
-        avg_priority = total_priority / total_tasks if total_tasks > 0 else 0.0
-
-        return TaskSummary(
-            total_tasks=total_tasks,
-            status_counts=status_counts,
-            completion_percentage=completion_percentage,
-            ready_queue_size=ready_queue_size,
-            tasks_with_dependencies=tasks_with_dependencies,
-            tasks_without_dependencies=tasks_without_dependencies,
-            blocked_tasks=blocked_tasks,
-            pending_tasks=pending_tasks,
-            ready_tasks=ready_tasks,
-            running_tasks=running_tasks,
-            completed_tasks=completed_tasks,
-            failed_tasks=failed_tasks,
-            cancelled_tasks=cancelled_tasks,
-            most_blocked_task=most_blocked_task,
-            max_dependencies=max_dependencies,
-            tenants=sorted(list(tenants_set)),
-            avg_priority=avg_priority,
-        )
+    def mark_task_failed(self, task_id: str):
+        """Mark task as failed"""
+        if task_id in self.tasks:
+            self.tasks[task_id].status = Status.FAILED
 
     def to_dict(self) -> dict:
         """Serialize graph for Firestore"""
@@ -338,28 +237,3 @@ class DependencyGraph:
         )
 
         return graph
-
-
-@dataclass
-class TaskSummary:
-    """
-    Comprehensive summary of all tasks in the dependency graph.
-    """
-
-    total_tasks: int
-    status_counts: Dict[str, int]
-    completion_percentage: float
-    ready_queue_size: int
-    tasks_with_dependencies: int
-    tasks_without_dependencies: int
-    blocked_tasks: int
-    pending_tasks: List[str]
-    ready_tasks: List[str]
-    running_tasks: List[str]
-    completed_tasks: List[str]
-    failed_tasks: List[str]
-    cancelled_tasks: List[str]
-    most_blocked_task: Optional[str]
-    max_dependencies: int
-    tenants: List[str]
-    avg_priority: float
