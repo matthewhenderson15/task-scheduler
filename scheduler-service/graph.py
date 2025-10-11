@@ -5,7 +5,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
+
+
+class Status(Enum):
+    PENDING = "pending"
+    READY = "ready"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Task:
@@ -26,7 +35,7 @@ class Task:
         self.api_config = api_config or {}
 
     def to_dict(self) -> dict:
-        """Task serialization for Firestore tasks"""
+        """Serialize for Firestore"""
         return {
             "task_id": self.task_id,
             "task_name": self.task_name,
@@ -40,10 +49,11 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: dict) -> Task:
+        """Deserialize from Firestore"""
         task = cls(
             task_id=data["task_id"],
             task_name=data["task_name"],
-            priority=data["priority"],
+            priority=data.get("priority", 0),
             api_config=data.get("api_config", {}),
         )
 
@@ -61,71 +71,27 @@ class DependencyGraph:
         self.in_degree = {}
         self.adjacency_list = defaultdict(set)
         self.reverse_adjacency_list = defaultdict(set)
-        self.ready_queue = []
 
-    def to_dict(self) -> dict:
-        """Serialize graph for Firestore"""
-        return {
-            "tasks": {task_id: task.to_dict() for task_id, task in self.tasks.items()},
-            "in_degree": self.in_degree,
-            "adjacency_list": {k: list(v) for k, v in self.adjacency_list.items()},
-            "reverse_adjacency_list": {
-                k: list(v) for k, v in self.reverse_adjacency_list.items()
-            },
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> DependencyGraph:
-        graph = cls()
-
-        for task_id, task_data in data["tasks"].items():
-            task = Task.from_dict(task_data)
-            graph.tasks[task_id] = task
-
-        graph.in_degree = data["in_degree"]
-        graph.adjacency_list = defaultdict(
-            set, {k: set(v) for k, v in data["adjacency_list"].items()}
-        )
-        graph.reverse_adjacency_list = defaultdict(
-            set, {k: set(v) for k, v in data["reverse_adjacency_list"].items()}
-        )
-
-        return graph
-
-    def _add_task(self, task: Task) -> None:
+    def add_task(self, task: Task):
         """
         Adds a task to the task dictionary for creation of graph and creates in_degree entry.
 
         Args:
             task (Task): The task to be added identified by the task ID.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If the task is already defined in the task map.
         """
         if task.task_id in self.tasks:
-            raise ValueError(
-                f"{task.task_id} is already defined in the task list. Please create a unique task ID!"
-            )
+            raise ValueError(f"Task {task.task_id} already exists")
 
         self.tasks[task.task_id] = task
         self.in_degree[task.task_id] = 0
 
-    def _add_dependency(self, dependent_task_id: str, dependency_task_id: str) -> bool:
+    def _add_dependency(self, dependent_task_id: str, dependency_task_id: str):
         """
         Adds a dependent task or dependency task.
 
         Args:
             dependent_task_id (str): The task ID that is dependent on another task (e.g., child task).
             dependency_task_id (str): The task ID that the other task depends on (e.g., parent task).
-
-        Returns:
-            bool: Whether the dependent and dependency tasks were properly added.
-
-        Raises:
-            ValueError: If the dependent or dependency tasks are not in the task list.
         """
         if dependent_task_id not in self.tasks or dependency_task_id not in self.tasks:
             raise ValueError("Dependent and dependency tasks must be in task list!")
@@ -134,20 +100,15 @@ class DependencyGraph:
             self.adjacency_list[dependency_task_id].add(dependent_task_id)
             self.reverse_adjacency_list[dependent_task_id].add(dependency_task_id)
             self.in_degree[dependent_task_id] += 1
-
             self.tasks[dependent_task_id].dependencies.add(dependency_task_id)
             self.tasks[dependency_task_id].dependents.add(dependent_task_id)
 
-        return True
-
-    def detect_cycles(self) -> Tuple[bool, Union[str, None]]:
+    def detect_cycles(self) -> Tuple[bool, Optional[str]]:
         """
         Detects cycles in the dependency graph using DFS with recursion stack.
 
         Returns:
-            Tuple[bool, Union[str, None]]: (has_cycle, error_message)
-                - True, error_message if cycle detected
-                - False, None if no cycles found
+            A tuple of whether there is a cycle and if true, the error message.
         """
         visited = set()
         recursion_stack = set()
@@ -180,66 +141,21 @@ class DependencyGraph:
 
         return (False, None)
 
-    def _get_ready_tasks(self) -> List[str]:
+    def get_ready_tasks(self) -> List[str]:
         """
         Identifies tasks that are ready to run (no pending dependencies).
 
         Returns:
-            List[str]: List of task IDs that became ready and were added to queue
+            A list of task IDs that became ready and were added to queue
         """
-        ready_tasks = []
-
+        ready = []
         for task_id, task in self.tasks.items():
             if task.status == Status.PENDING and self.in_degree[task_id] == 0:
                 task.status = Status.READY
-                ready_tasks.append(task_id)
+                ready.append((task.scheduled_time, task.priority, task_id))
 
-                heap_entry = (
-                    task.scheduled_time,
-                    task.priority,
-                    task.task_id,
-                )
-                heapq.heappush(self.ready_queue, heap_entry)
-
-        return ready_tasks
-
-    def _get_next_task(self) -> Optional[Task]:
-        """
-        Gets the next highest priority ready task from the queue.
-
-        Returns:
-            Optional[Task]: The next task to execute, or None if no ready tasks available.
-
-        Note:
-            - Does NOT mark task as RUNNING (caller's responsibility)
-            - Validates task still exists and is in READY status
-            - Uses heap ordering: earliest scheduled_time, then lowest priority number
-            - Loops through queue to skip stale tasks, max attempts = queue length
-        """
-        if not self.ready_queue:
-            return None
-
-        max_attempts = len(self.ready_queue)
-        attempts = 0
-
-        while self.ready_queue and attempts < max_attempts:
-            _, _, task_id = heapq.heappop(self.ready_queue)
-            attempts += 1
-
-            if task_id not in self.tasks:
-                continue
-
-            task = self.tasks[task_id]
-
-            if task.status != Status.READY:
-                continue
-
-            if self.in_degree[task_id] > 0:
-                continue
-
-            return task
-
-        return None
+        ready.sort()
+        return [task_id for _, _, task_id in ready]
 
     def mark_task_complete(self, task_id: str) -> List[str]:
         """
@@ -394,6 +310,35 @@ class DependencyGraph:
             avg_priority=avg_priority,
         )
 
+    def to_dict(self) -> dict:
+        """Serialize graph for Firestore"""
+        return {
+            "tasks": {task_id: task.to_dict() for task_id, task in self.tasks.items()},
+            "in_degree": self.in_degree,
+            "adjacency_list": {k: list(v) for k, v in self.adjacency_list.items()},
+            "reverse_adjacency_list": {
+                k: list(v) for k, v in self.reverse_adjacency_list.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> DependencyGraph:
+        graph = cls()
+
+        for task_id, task_data in data["tasks"].items():
+            task = Task.from_dict(task_data)
+            graph.tasks[task_id] = task
+
+        graph.in_degree = data["in_degree"]
+        graph.adjacency_list = defaultdict(
+            set, {k: set(v) for k, v in data["adjacency_list"].items()}
+        )
+        graph.reverse_adjacency_list = defaultdict(
+            set, {k: set(v) for k, v in data["reverse_adjacency_list"].items()}
+        )
+
+        return graph
+
 
 @dataclass
 class TaskSummary:
@@ -418,12 +363,3 @@ class TaskSummary:
     max_dependencies: int
     tenants: List[str]
     avg_priority: float
-
-
-class Status(Enum):
-    PENDING = "pending"
-    READY = "ready"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
