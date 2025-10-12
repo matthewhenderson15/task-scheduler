@@ -1,0 +1,39 @@
+name: 'Deploy Scheduler Service'
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scheduler-service/**'
+      - '.github/workflows/scheduler-service.yml'
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+  SERVICE_NAME: scheduler
+  IMAGE_NAME: scheduler
+  REGISTRY: gcr.io
+
+jobs:
+  build:
+    name: Build and Push Scheduler Image
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+      image-url: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker authentication
+        run: gcloud auth configure-docker ${{ env.REGISTRY }}
