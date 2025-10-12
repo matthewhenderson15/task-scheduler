@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 from collections import defaultdict
 from datetime import datetime
 from enum import Enum
@@ -13,7 +12,6 @@ class Status(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 class Task:
@@ -22,7 +20,7 @@ class Task:
         task_id: str,
         task_name: str,
         priority: int,
-        api_config: dict = None,
+        task_config: dict = None,
     ):
         self.task_id = task_id
         self.task_name = task_name
@@ -31,7 +29,7 @@ class Task:
         self.dependencies = set()
         self.dependents = set()
         self.status = Status.PENDING
-        self.api_config = api_config or {}
+        self.task_config = task_config or {}
 
     def to_dict(self) -> dict:
         """Serialize for Firestore"""
@@ -43,7 +41,7 @@ class Task:
             "status": self.status.value,
             "dependencies": list(self.dependencies),
             "dependents": list(self.dependents),
-            "api_config": self.api_config,
+            "task_config": self.task_config,
         }
 
     @classmethod
@@ -53,7 +51,7 @@ class Task:
             task_id=data["task_id"],
             task_name=data["task_name"],
             priority=data.get("priority", 0),
-            api_config=data.get("api_config", {}),
+            task_config=data.get("task_config", {}),
         )
 
         task.scheduled_time = datetime.fromisoformat(data["scheduled_time"])
@@ -84,7 +82,7 @@ class DependencyGraph:
         self.tasks[task.task_id] = task
         self.in_degree[task.task_id] = 0
 
-    def _add_dependency(self, dependent_task_id: str, dependency_task_id: str):
+    def add_dependency(self, dependent_task_id: str, dependency_task_id: str):
         """
         Adds a dependent task or dependency task.
 
@@ -164,12 +162,12 @@ class DependencyGraph:
             task_id (str): The task_id to be marked as complete.
 
         Returns:
-            List[str]: List of newly ready task IDs that became available.
+            List of newly ready task IDs that became available.
         """
         if task_id not in self.tasks:
             raise ValueError(f"Task {task_id} not found in dependency graph.")
 
-        task: Task = self.tasks[task_id]
+        task = self.tasks[task_id]
 
         if task.status != Status.RUNNING:
             raise ValueError(
@@ -177,7 +175,6 @@ class DependencyGraph:
             )
 
         task.status = Status.COMPLETED
-
         new_ready_tasks = []
 
         for dependent_task_id in self.adjacency_list[task_id]:
@@ -186,20 +183,12 @@ class DependencyGraph:
                 self.in_degree[dependent_task_id] == 0
                 and self.tasks[dependent_task_id].status == Status.PENDING
             ):
-                dependent_task = self.tasks[dependent_task_id]
-                dependent_task.status = Status.READY
+                self.tasks[dependent_task_id].status = Status.READY
                 new_ready_tasks.append(dependent_task_id)
-
-                heap_entry = (
-                    dependent_task.scheduled_time,
-                    dependent_task.priority,
-                    dependent_task.task_id,
-                )
-                heapq.heappush(self.ready_queue, heap_entry)
 
         return new_ready_tasks
 
-    def mark_test_running(self, task_id: str):
+    def mark_task_running(self, task_id: str):
         """Mark task as running"""
         if task_id in self.tasks:
             self.tasks[task_id].status = Status.RUNNING
