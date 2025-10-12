@@ -3,6 +3,7 @@ import os
 
 from flask import Flask, jsonify, request
 from google.cloud import tasks_v2
+from google.protobuf import duration_pb2
 from graph import DependencyGraph, Status, Task
 from state import WorkflowState
 
@@ -67,7 +68,7 @@ def schedule_workflow():
         if has_cycle:
             return jsonify({"error": error_message}), 400
 
-        state.create_workflow(workflow_id, graph)
+        state.save_workflow(workflow_id, graph)
 
         ready_tasks = graph.get_ready_tasks()
         for task in ready_tasks:
@@ -88,7 +89,7 @@ def schedule_workflow():
 
 
 @app.route("/task-status", methods=["POST"])
-def task_complete():
+def task_status():
     """
     Called by worker when a task completes.
 
@@ -100,14 +101,35 @@ def task_complete():
         "result": {...}
     }
     """
-    # TODO:
-    # 1. Load workflow from Firestore
-    # 2. Mark task as complete in graph
-    # 3. Get newly ready tasks
-    # 4. Submit them to Cloud Tasks
-    # 5. Save updated graph
+    try:
+        data = request.get_json()
+        workflow_id = data["workflow_id"]
+        task_id = data["task_id"]
+        status = data["status"]
 
-    return jsonify({"status": "acknowledged"}), 200
+        graph = state.get_workflow(workflow_id)
+        if not graph:
+            return jsonify({"error": "Workflow not found"}), 404
+
+        if status == Status.COMPLETED:
+            new_ready_tasks = graph.mark_task_complete(task_id)
+            state.save_workflow(workflow_id, graph)
+
+            for task in new_ready_tasks:
+                submit_task_to_queue(workflow_id, task)
+
+            return jsonify({"status": "ok", "new_ready_tasks": new_ready_tasks}), 200
+
+        elif status == Status.FAILED:
+            graph.mark_task_failed(task_id)
+            state.save_workflow(workflow_id, graph)
+            return jsonify({"status": "ok"}), 200
+
+        else:
+            return jsonify({"error": f"Unknown status: {status}"}), 400
+
+    except Exception as e:
+        return jsonify({"error": e}), 500
 
 
 @app.route("/workflow/<workflow_id>", methods=["GET"])
@@ -152,6 +174,7 @@ def submit_task_to_queue(workflow_id: str, task: Task) -> None:
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps(payload).encode(),
         },
+        "dispatch_deadline": duration_pb2.Duration(seconds=600),
     }
 
     client.create_task(request={"parent": parent, "task": cloud_task})

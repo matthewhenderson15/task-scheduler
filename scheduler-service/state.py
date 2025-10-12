@@ -11,7 +11,7 @@ class WorkflowState:
         self.db = firestore.Client()
         self.collection = self.db.collection("workflows")
 
-    def create_workflow(self, workflow_id: str, graph: DependencyGraph):
+    def save_workflow(self, workflow_id: str, graph: DependencyGraph):
         """
         Save workflow graph to Firestore.
 
@@ -34,22 +34,9 @@ class WorkflowState:
         """
         workflow_doc = self.collection.document(workflow_id).get()
         if workflow_doc.exists:
-            return DependencyGraph.from_dict(workflow_doc)
+            return DependencyGraph.from_dict(workflow_doc.to_dict())
 
         return None
-
-    def update_task_status(self, workflow_id: str, task_id: str, status: str):
-        """
-        Update a single task's status.
-
-        Args:
-            workflow_id: Workflow containing the task
-            task_id: Task to update
-            status: New status (COMPLETED, FAILED, etc.)
-        """
-        self.collection.document(workflow_id).update(
-            {f"tasks.{task_id}.status": status}
-        )
 
     def delete_workflow(self, workflow_id: str):
         """
