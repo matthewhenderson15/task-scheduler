@@ -3,6 +3,7 @@ import os
 
 from flask import Flask, jsonify, request
 from google.cloud import tasks_v2
+from google.protobuf import duration_pb2
 from graph import DependencyGraph, Status, Task
 from state import WorkflowState
 
@@ -55,8 +56,8 @@ def schedule_workflow():
             task = Task(
                 task_id=task_data["id"],
                 task_name=task_data["name"],
-                priority=task_data["priority"],
-                task_config=task_data["task_config"],
+                priority=task_data.get("priority", 0),
+                task_config=task_data.get("task_config", {}),
             )
             graph.add_task(task)
 
@@ -67,7 +68,7 @@ def schedule_workflow():
         if has_cycle:
             return jsonify({"error": error_message}), 400
 
-        state.create_workflow(workflow_id, graph)
+        state.save_workflow(workflow_id, graph)
 
         ready_tasks = graph.get_ready_tasks()
         for task in ready_tasks:
@@ -88,7 +89,7 @@ def schedule_workflow():
 
 
 @app.route("/task-status", methods=["POST"])
-def task_complete():
+def task_status():
     """
     Called by worker when a task completes.
 
@@ -100,14 +101,59 @@ def task_complete():
         "result": {...}
     }
     """
-    # TODO:
-    # 1. Load workflow from Firestore
-    # 2. Mark task as complete in graph
-    # 3. Get newly ready tasks
-    # 4. Submit them to Cloud Tasks
-    # 5. Save updated graph
+    try:
+        data = request.get_json()
+        workflow_id = data["workflow_id"]
+        task_id = data["task_id"]
+        status = data["status"]
 
-    return jsonify({"status": "acknowledged"}), 200
+        graph = state.get_workflow(workflow_id)
+        if not graph:
+            return jsonify({"error": "Workflow not found"}), 404
+
+        if status == Status.COMPLETED:
+            new_ready_tasks = graph.mark_task_complete(task_id)
+            state.save_workflow(workflow_id, graph)
+
+            for task in new_ready_tasks:
+                submit_task_to_queue(workflow_id, task)
+
+            return jsonify({"status": "ok", "new_ready_tasks": new_ready_tasks}), 200
+
+        elif status == Status.FAILED:
+            task = graph.tasks[task_id]
+
+            retry_config = task.task_config.get("retry", {})
+            max_retries = retry_config.get("max_attempts", 0)
+            current_attempt = task.task_config.get("retry_count", 0)
+
+            if current_attempt < max_retries:
+                task.task_config["retry_count"] = current_attempt + 1
+                task.status = Status.READY
+
+                state.save_workflow(workflow_id, graph)
+                submit_task_to_queue(workflow_id, task)
+
+                return jsonify(
+                    {
+                        "status": "retrying",
+                        "attempt": current_attempt + 1,
+                        "max_attempts": max_retries,
+                    }
+                ), 200
+            else:
+                graph.mark_task_failed(task_id)
+                state.save_workflow(workflow_id, graph)
+
+                return jsonify(
+                    {"status": "failed", "message": "Max retries exhausted"}
+                ), 200
+
+        else:
+            return jsonify({"error": f"Unknown status: {status}"}), 400
+
+    except Exception as e:
+        return jsonify({"error": e}), 500
 
 
 @app.route("/workflow/<workflow_id>", methods=["GET"])
@@ -117,12 +163,29 @@ def get_workflow_status(workflow_id: str):
 
     Returns summary of all tasks and their statuses.
     """
-    # TODO:
-    # 1. Load workflow from Firestore
-    # 2. Generate task summary
-    # 3. Return status
+    try:
+        graph = state.get_workflow(workflow_id)
+        if not graph:
+            return jsonify({"error": "Workflow not found"}), 404
 
-    return jsonify({"workflow_id": workflow_id}), 200
+        tasks = {}
+        for task_id, task in graph.tasks.items():
+            tasks[task_id] = {
+                "name": task.task_name,
+                "status": task.status.value,
+                "dependencies": list(task.dependencies),
+            }
+
+        return jsonify(
+            {
+                "workflow_id": workflow_id,
+                "total_tasks": len(graph.tasks),
+                "summary": tasks,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 def submit_task_to_queue(workflow_id: str, task: Task) -> None:
@@ -152,6 +215,7 @@ def submit_task_to_queue(workflow_id: str, task: Task) -> None:
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps(payload).encode(),
         },
+        "dispatch_deadline": duration_pb2.Duration(seconds=600),
     }
 
     client.create_task(request={"parent": parent, "task": cloud_task})
