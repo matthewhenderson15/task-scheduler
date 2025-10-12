@@ -56,8 +56,8 @@ def schedule_workflow():
             task = Task(
                 task_id=task_data["id"],
                 task_name=task_data["name"],
-                priority=task_data["priority"],
-                task_config=task_data["task_config"],
+                priority=task_data.get("priority", 0),
+                task_config=task_data.get("task_config", {}),
             )
             graph.add_task(task)
 
@@ -121,9 +121,33 @@ def task_status():
             return jsonify({"status": "ok", "new_ready_tasks": new_ready_tasks}), 200
 
         elif status == Status.FAILED:
-            graph.mark_task_failed(task_id)
-            state.save_workflow(workflow_id, graph)
-            return jsonify({"status": "ok"}), 200
+            task = graph.tasks[task_id]
+
+            retry_config = task.task_config.get("retry", {})
+            max_retries = retry_config.get("max_attempts", 0)
+            current_attempt = task.task_config.get("retry_count", 0)
+
+            if current_attempt < max_retries:
+                task.task_config["retry_count"] = current_attempt + 1
+                task.status = Status.READY
+
+                state.save_workflow(workflow_id, graph)
+                submit_task_to_queue(workflow_id, task)
+
+                return jsonify(
+                    {
+                        "status": "retrying",
+                        "attempt": current_attempt + 1,
+                        "max_attempts": max_retries,
+                    }
+                ), 200
+            else:
+                graph.mark_task_failed(task_id)
+                state.save_workflow(workflow_id, graph)
+
+                return jsonify(
+                    {"status": "failed", "message": "Max retries exhausted"}
+                ), 200
 
         else:
             return jsonify({"error": f"Unknown status: {status}"}), 400
@@ -139,12 +163,29 @@ def get_workflow_status(workflow_id: str):
 
     Returns summary of all tasks and their statuses.
     """
-    # TODO:
-    # 1. Load workflow from Firestore
-    # 2. Generate task summary
-    # 3. Return status
+    try:
+        graph = state.get_workflow(workflow_id)
+        if not graph:
+            return jsonify({"error": "Workflow not found"}), 404
 
-    return jsonify({"workflow_id": workflow_id}), 200
+        tasks = {}
+        for task_id, task in graph.tasks.items():
+            tasks[task_id] = {
+                "name": task.task_name,
+                "status": task.status.value,
+                "dependencies": list(task.dependencies),
+            }
+
+        return jsonify(
+            {
+                "workflow_id": workflow_id,
+                "total_tasks": len(graph.tasks),
+                "summary": tasks,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 def submit_task_to_queue(workflow_id: str, task: Task) -> None:
